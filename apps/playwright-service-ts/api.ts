@@ -192,7 +192,8 @@ const initializeBrowser = async () => {
       '--disable-accelerated-2d-canvas',
       '--no-first-run',
       '--no-zygote',
-      '--disable-gpu'
+      '--disable-gpu',
+      '--disable-blink-features=AutomationControlled'
     ]
   });
 };
@@ -209,6 +210,8 @@ const createContext = async (skipTlsVerification: boolean = false, userAgentOver
     viewport,
     ignoreHTTPSErrors: skipTlsVerification,
     serviceWorkers: 'block',
+    locale: 'nl-NL',
+    timezoneId: 'Europe/Amsterdam',
   };
 
   if (PROXY_SERVER && PROXY_USERNAME && PROXY_PASSWORD) {
@@ -224,6 +227,56 @@ const createContext = async (skipTlsVerification: boolean = false, userAgentOver
   }
 
   const newContext = await browser.newContext(contextOptions);
+
+  // Basic automation-detection evasions (headless Chromium has no stealth
+  // patches by default; bot-management vendors like Akamai/PerimeterX check
+  // for exactly these tells regardless of source IP reputation).
+  await newContext.addInitScript(() => {
+    // navigator.webdriver must be undefined, and the property must not even
+    // exist on the prototype (patching the instance alone is detectable).
+    Object.defineProperty(Navigator.prototype, 'webdriver', {
+      get: () => undefined,
+      configurable: true,
+    });
+
+    // Headless Chromium omits window.chrome entirely; real Chrome always has it.
+    (window as any).chrome = { runtime: {} };
+
+    // navigator.permissions.query('notifications') returns 'denied' under
+    // headless automation even when Notification.permission is 'default'.
+    const originalQuery = window.navigator.permissions.query.bind(window.navigator.permissions);
+    // @ts-ignore
+    window.navigator.permissions.query = (parameters: any) =>
+      parameters?.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission } as PermissionStatus)
+        : originalQuery(parameters);
+
+    // Headless Chromium reports empty plugins/mimeTypes; real Chrome always
+    // has the built-in PDF viewer plugins.
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => [1, 2, 3, 4, 5].map(() => ({ name: 'Chrome PDF Plugin' })),
+    });
+    Object.defineProperty(navigator, 'languages', {
+      get: () => ['nl-NL', 'nl', 'en-US', 'en'],
+    });
+
+    // SwiftShader's software-rendered WebGL vendor/renderer strings are a
+    // well-known headless/datacenter tell; report a plausible GPU instead.
+    const patchGetParameter = (proto: any) => {
+      const originalGetParameter = proto.getParameter;
+      proto.getParameter = function (parameter: number) {
+        if (parameter === 37445) return 'Intel Inc.'; // UNMASKED_VENDOR_WEBGL
+        if (parameter === 37446) return 'Intel Iris OpenGL Engine'; // UNMASKED_RENDERER_WEBGL
+        return originalGetParameter.call(this, parameter);
+      };
+    };
+    if ((window as any).WebGLRenderingContext) {
+      patchGetParameter((window as any).WebGLRenderingContext.prototype);
+    }
+    if ((window as any).WebGL2RenderingContext) {
+      patchGetParameter((window as any).WebGL2RenderingContext.prototype);
+    }
+  });
 
   if (BLOCK_MEDIA) {
     await newContext.route('**/*.{png,jpg,jpeg,gif,svg,mp3,mp4,avi,flac,ogg,wav,webm}', async (route: Route, request: PlaywrightRequest) => {
