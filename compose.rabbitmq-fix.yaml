@@ -26,6 +26,14 @@ services:
 
   playwright-service:
     restart: unless-stopped
+    environment:
+      # Which desktop platform the browser presents as. See the long comment in
+      # apps/playwright-service-ts/api.ts: Cloudflare sites (fragrantica.com)
+      # block a Linux claim, Akamai sites (zalando.nl) block a Windows claim
+      # because it contradicts the real Linux TLS fingerprint. No value wins
+      # both; windows is the default because Cloudflare is far more common.
+      # Set to `linux` here (or in the Komodo stack environment) to flip.
+      STEALTH_PLATFORM: ${STEALTH_PLATFORM:-windows}
 
   rabbitmq:
     restart: unless-stopped
