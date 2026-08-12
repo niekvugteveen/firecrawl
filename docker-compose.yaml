@@ -108,7 +108,9 @@ services:
       rabbitmq:
         condition: service_healthy
     ports:
-      - "${PORT:-3002}:${INTERNAL_PORT:-3002}"
+      # Loopback-only for Caddy on this host. Other containers reach the API
+      # via the firecrawl_backend / local-tools Docker networks (e.g. http://api:3002).
+      - "127.0.0.1:${PORT:-3002}:${INTERNAL_PORT:-3002}"
     volumes:
       - fdb-cluster-file:/var/fdb:ro
     command: node dist/src/harness.js --start-docker
