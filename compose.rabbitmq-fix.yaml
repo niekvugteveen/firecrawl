@@ -1,13 +1,34 @@
 services:
   api:
+    # Upstream ships no restart policy on any service, so a host reboot -- or a
+    # single cold-start overrun like the one below -- leaves the whole stack
+    # down until someone starts it by hand. Every other service on this box
+    # (searxng, grafana) runs unless-stopped; match that.
+    restart: unless-stopped
     environment:
       # Rarely-used self-hosted instance: shrink the nuq worker pool from the
       # upstream default of 5 to 2. Each nuq-worker is a full Node process
       # (~320 MB resident regardless of traffic), so this frees ~950 MB. Two
       # workers is ample throughput for this instance's low request volume.
       NUQ_WORKER_COUNT: "2"
+      # harness.js waits for the API to bind :3002 and hard-exits(1) if it does
+      # not. On this 2-vCPU host a full-stack cold start (api + 2 nuq workers +
+      # extract worker, all booting at once) has overrun the 60s upstream
+      # default and killed the container. 180s leaves headroom; it only affects
+      # how long a genuinely broken start waits before giving up.
+      HARNESS_STARTUP_TIMEOUT_MS: "180000"
+
+  redis:
+    restart: unless-stopped
+
+  nuq-postgres:
+    restart: unless-stopped
+
+  playwright-service:
+    restart: unless-stopped
 
   rabbitmq:
+    restart: unless-stopped
     environment:
       RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit quorum_commands_soft_limit 0"
     healthcheck:
