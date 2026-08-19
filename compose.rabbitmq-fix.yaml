@@ -29,7 +29,10 @@ services:
     # just restarted -- and a cold start, where all seven boot at once, is the
     # most memory-intensive moment there is. It is not a 7-day extract-workload
     # peak. 3G is ~1.5x it; if extract jobs ever OOM here, raise it rather than
-    # assuming a leak.
+    # assuming a leak. Observed sitting at 1.805 GiB (60% of the limit) in the
+    # minutes after the deploy, against 1.57 GiB steady beforehand -- boot is
+    # the expensive part, but this is the one service here with real headroom
+    # pressure, so it is the one to watch.
     mem_limit: 3G
     memswap_limit: 3G
 
@@ -80,14 +83,32 @@ services:
     # write on a box that idles at 0.2% io pressure -- irrelevant here, and it
     # would be the wrong trade on the NAS's spinning disks.
     #
-    # The mem_limit and the WAL setting are load-bearing on each other, so do
-    # not lower one without the other: RabbitMQ computes vm_memory_high_watermark
-    # as 0.4 of the memory it detects, and with a cgroup limit in place that is
-    # 0.4 of *this limit*, not of host RAM. At 1500M the watermark lands at
-    # ~600 MiB against an expected ~300 MiB resident. Cut the limit to 1G while
-    # leaving the WAL at 512 MiB and the watermark (400 MiB) would sit *below*
-    # the WAL's own footprint -- RabbitMQ would block publishers permanently,
-    # which surfaces as scrapes hanging rather than as an out-of-memory error.
+    # Measured after deploying this (2026-08-19): ETS 471 MiB -> 2.4 MiB, total
+    # Erlang memory 583 MB -> 65 MB, container 722 MiB -> 145 MiB. Read that
+    # honestly, though -- the container also *restarted*, and ra's WAL mem table
+    # is built up at runtime rather than pre-allocated at boot, so a fresh node
+    # would start small whatever this value was. What the setting durably buys
+    # is the ceiling that accumulation runs into: ~64 MiB instead of ~471 MiB.
+    # The steady state needs days of uptime to confirm, not minutes.
+    #
+    # NOTE: an earlier version of this comment claimed the mem_limit below and
+    # this WAL size were load-bearing on each other, because RabbitMQ would
+    # compute vm_memory_high_watermark as 0.4 of the cgroup limit once one was
+    # set. That is wrong, and was checked: with mem_limit in force,
+    # `rabbitmqctl status` on 3.13.7 still reports "0.4 of available memory,
+    # computed to: 5.0195 gb" -- i.e. 0.4 of *host* RAM. It does not see the
+    # cgroup at all. The two values are therefore independent, and the limit
+    # can be lowered without touching the WAL.
+    #
+    # The real consequence of that is the opposite of what the old comment
+    # feared, and is a genuine (accepted) gap: the watermark at 5.02 GiB sits
+    # far *above* the 1.465 GiB cgroup limit, so RabbitMQ will never engage
+    # flow control -- the kernel OOM-kills the container first. There is no
+    # graceful degradation path here, only a restart. Tolerated because all
+    # four queues hold zero messages and the node idles at ~145 MiB, roughly a
+    # tenth of the limit. To close it properly, set an absolute watermark below
+    # the limit (vm_memory_high_watermark.absolute = 1GB) so publishers block
+    # before the kernel intervenes.
     mem_limit: 1500M
     memswap_limit: 1500M
     environment:
