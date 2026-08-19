@@ -17,15 +17,44 @@ services:
       # default and killed the container. 180s leaves headroom; it only affects
       # how long a genuinely broken start waits before giving up.
       HARNESS_STARTUP_TIMEOUT_MS: "180000"
+    # Upstream's 8G is a third of this 11.7G host, and the api container alone
+    # would not be the thing that ran it out of memory -- it would just be the
+    # one still standing. `api` is not one process: harness.js supervises seven
+    # Node processes (api, queue-worker, extract-worker, 2x nuq-worker,
+    # nuq-prefetch, nuq-reconciler), six of which idle at ~320 MB each because
+    # the same bundle is loaded into six separate V8 heaps. Measured 2026-08-19:
+    # 1.57 GiB steady, cgroup high-water 2011 MiB.
+    #
+    # Caveat on that peak: it covers only 20 minutes, because the container had
+    # just restarted -- and a cold start, where all seven boot at once, is the
+    # most memory-intensive moment there is. It is not a 7-day extract-workload
+    # peak. 3G is ~1.5x it; if extract jobs ever OOM here, raise it rather than
+    # assuming a leak.
+    mem_limit: 3G
+    memswap_limit: 3G
 
   redis:
     restart: unless-stopped
+    # Measured high-water over 7 days: 15 MiB. This is a job-coordination cache,
+    # not a data store; 256M is pure blast-radius bounding.
+    mem_limit: 256M
+    memswap_limit: 256M
 
   nuq-postgres:
     restart: unless-stopped
+    # Measured high-water over 7 days: 181 MiB.
+    mem_limit: 512M
+    memswap_limit: 512M
 
   playwright-service:
     restart: unless-stopped
+    # Measured over 7 days of real scraping: 484 MiB idle, high-water 1455 MiB
+    # -- this one genuinely uses its memory, since `channel: chrome` runs full
+    # Google Chrome and BROWSER_POOL_SIZE is 5. 2G is ~1.4x the observed peak.
+    # Lower this before lowering the pool size: a too-small limit OOM-kills the
+    # container mid-scrape, where a smaller pool just queues.
+    mem_limit: 2G
+    memswap_limit: 2G
     environment:
       # Which desktop platform the browser presents as. See the long comment in
       # apps/playwright-service-ts/api.ts: Cloudflare sites (fragrantica.com)
@@ -37,8 +66,32 @@ services:
 
   rabbitmq:
     restart: unless-stopped
+    # 722 MiB resident while every queue held *zero* messages (measured
+    # 2026-08-19). `rabbitmqctl status` attributed 61% of that to quorum_ets,
+    # and `erlang:memory()` confirmed 471 MiB of it is ETS -- against a WAL file
+    # on disk of 7.7 MB last written on 30 June. So it is not backlog and not
+    # traffic: all four queues (extract.jobs, extract.dlq, and the two nuq
+    # prefetch queues) are `quorum` type, and Ra sizes its write-ahead-log mem
+    # tables off wal_max_size_bytes, which was sitting at the 512 MiB default
+    # (verified: application:get_env(ra, wal_max_size_bytes) -> 536870912).
+    #
+    # 64 MiB is still generous for four permanently-idle queues. The cost of a
+    # smaller WAL is more frequent rollover to segment files, which is an SSD
+    # write on a box that idles at 0.2% io pressure -- irrelevant here, and it
+    # would be the wrong trade on the NAS's spinning disks.
+    #
+    # The mem_limit and the WAL setting are load-bearing on each other, so do
+    # not lower one without the other: RabbitMQ computes vm_memory_high_watermark
+    # as 0.4 of the memory it detects, and with a cgroup limit in place that is
+    # 0.4 of *this limit*, not of host RAM. At 1500M the watermark lands at
+    # ~600 MiB against an expected ~300 MiB resident. Cut the limit to 1G while
+    # leaving the WAL at 512 MiB and the watermark (400 MiB) would sit *below*
+    # the WAL's own footprint -- RabbitMQ would block publishers permanently,
+    # which surfaces as scrapes hanging rather than as an out-of-memory error.
+    mem_limit: 1500M
+    memswap_limit: 1500M
     environment:
-      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit quorum_commands_soft_limit 0"
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit quorum_commands_soft_limit 0 -ra wal_max_size_bytes 67108864"
     healthcheck:
       # Upstream default (rabbitmq-diagnostics check_running, 5s interval/timeout) spawns a
       # fresh Erlang distribution node per check. Under any boot slowdown that pushes a single
