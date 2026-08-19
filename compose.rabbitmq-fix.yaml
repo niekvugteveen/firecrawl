@@ -100,19 +100,30 @@ services:
     # cgroup at all. The two values are therefore independent, and the limit
     # can be lowered without touching the WAL.
     #
-    # The real consequence of that is the opposite of what the old comment
-    # feared, and is a genuine (accepted) gap: the watermark at 5.02 GiB sits
-    # far *above* the 1.465 GiB cgroup limit, so RabbitMQ will never engage
-    # flow control -- the kernel OOM-kills the container first. There is no
-    # graceful degradation path here, only a restart. Tolerated because all
-    # four queues hold zero messages and the node idles at ~145 MiB, roughly a
-    # tenth of the limit. To close it properly, set an absolute watermark below
-    # the limit (vm_memory_high_watermark.absolute = 1GB) so publishers block
-    # before the kernel intervenes.
+    # The real consequence of that runs the opposite way, and is why the
+    # absolute watermark below is set rather than left at the default: a
+    # watermark of 5.02 GiB sits far *above* the 1.465 GiB cgroup limit, so
+    # RabbitMQ would never engage flow control -- the kernel would OOM-kill the
+    # container first, and the only recovery is a restart. Because RabbitMQ
+    # ignores the cgroup, the watermark has to be told the limit by hand.
+    #
+    # 1 GiB against a 1500M limit leaves ~465 MiB of headroom, which matters
+    # because blocking publishers does not stop memory growth instantly. The
+    # ordering is now: publishers block at 1 GiB, kernel kills at 1.465 GiB.
+    # Keep that gap if you change either number.
+    #
+    # The {absolute,Bytes} tuple is an Erlang term parsed off the command line,
+    # so it must contain no spaces. Verified before deploying, in a throwaway
+    # rabbitmq:3.13.7 container with these exact args: it boots, and status
+    # reports "Memory high watermark setting: 1.0737 gb, computed to:
+    # 1.0737 gb" instead of the "0.4 of available memory" line. Worth redoing
+    # that check if this string is ever edited -- a malformed term here does
+    # not degrade, it stops the node from booting, and api's healthcheck
+    # dependency then takes the whole stack down with it.
     mem_limit: 1500M
     memswap_limit: 1500M
     environment:
-      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit quorum_commands_soft_limit 0 -ra wal_max_size_bytes 67108864"
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit quorum_commands_soft_limit 0 -ra wal_max_size_bytes 67108864 -rabbit vm_memory_high_watermark {absolute,1073741824}"
     healthcheck:
       # Upstream default (rabbitmq-diagnostics check_running, 5s interval/timeout) spawns a
       # fresh Erlang distribution node per check. Under any boot slowdown that pushes a single
