@@ -35,6 +35,14 @@ services:
     # pressure, so it is the one to watch.
     mem_limit: 3G
     memswap_limit: 3G
+    # Ook op het gedeelde netwerk `local-tools` (eigendom van de searxng-stack op
+    # opti-core). Daar bereikt storycrafter deze API als `api:3002`, en bereikt de API
+    # zelf SearXNG als `searxng:8080`. Op vps1 regelde een timer die koppeling met
+    # `docker network connect`; dit maakt hem declaratief. De publieke namen gaan op
+    # opti-core niet: dat is container -> host, en dat blokkeert de host-firewall.
+    networks:
+      - backend
+      - local-tools
 
   redis:
     restart: unless-stopped
@@ -151,3 +159,8 @@ services:
 
   foundationdb-init:
     profiles: ["fdb"]
+
+networks:
+  local-tools:
+    name: local-tools
+    external: true
