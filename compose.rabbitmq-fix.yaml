@@ -74,6 +74,13 @@ services:
       # both; windows is the default because Cloudflare is far more common.
       # Set to `linux` here (or in the Komodo stack environment) to flip.
       STEALTH_PLATFORM: ${STEALTH_PLATFORM:-windows}
+    # Ook op `local-tools`, om de egress-router (stack `egress` op opti-core) te bereiken:
+    # PROXY_SERVER=http://egress-router:8888 in de Komodo-env. Die stuurt standaard via de
+    # VPN en per domein naar het thuis-IP; zie docker/docs/egress-plan.md in de homelab-repo.
+    # `backend` blijft nodig: daar roept de api deze service aan als playwright-service:3000.
+    networks:
+      - backend
+      - local-tools
 
   rabbitmq:
     restart: unless-stopped
