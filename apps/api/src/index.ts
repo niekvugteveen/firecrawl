@@ -13,6 +13,7 @@ import {
   getPrecrawlQueue,
 } from "./services/queue-service";
 import { v0Router } from "./routes/v0";
+import { startNodeRuntimeMetrics } from "./lib/node-runtime-metrics";
 import os from "os";
 import { logger } from "./lib/logger";
 import { adminRouter } from "./routes/admin";
@@ -112,6 +113,7 @@ const DEFAULT_PORT = config.PORT;
 const HOST = config.HOST;
 
 async function startServer(port = DEFAULT_PORT) {
+  startNodeRuntimeMetrics();
   try {
     await initializeBlocklist();
     initializeEngineForcing();
