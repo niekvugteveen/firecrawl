@@ -179,7 +179,13 @@ interface UrlModel {
   skip_tls_verification?: boolean;
 }
 
-let browser: Browser;
+// null = not started yet, or dead (crash, OOM under the cgroup limit, fork failure).
+// Always go through ensureBrowser(), which relaunches when needed. Upstream kept
+// reusing a dead browser (`if (!browser)`), so every /scrape returned 500 until the
+// container was restarted -- firecrawl#4993.
+let browser: Browser | null = null;
+// One shared launch, so concurrent requests after a crash do not each start a Chrome.
+let browserLaunch: Promise<Browser> | null = null;
 
 // Derived once at startup from the browser itself, then reused for every
 // context. See the comment in initializeBrowser for why this is not random.
@@ -187,8 +193,8 @@ let defaultUserAgent: string | null = null;
 
 const ACCEPT_LANGUAGE = 'nl-NL,nl;q=0.9,en-US;q=0.8,en;q=0.7';
 
-const initializeBrowser = async () => {
-  browser = await chromium.launch({
+const initializeBrowser = async (): Promise<Browser> => {
+  const launched = await chromium.launch({
     // channel:'chrome' runs *real Google Chrome*, not Playwright's bundled
     // chromium_headless_shell (which headless:true selects by default since
     // Playwright 1.49). The shell is not a cosmetic difference: it announces
@@ -222,12 +228,35 @@ const initializeBrowser = async () => {
   // -- Chrome 58 (2017) claiming macOS, while the process is Chrome 151 with
   // Linux client hints, Linux WebGL strings and Linux fonts. That
   // self-contradiction is a stronger bot signal than no spoofing at all.
-  const browserMajorVersion = (browser.version().match(/^(\d+)/) || [])[1] || '151';
+  launched.on('disconnected', () => {
+    // Only clear it if this is still the active browser: an old one dying late must
+    // not discard one that has already been relaunched.
+    if (browser === launched) {
+      console.error('Browser disconnected (crash/OOM?); relaunching on the next request');
+      browser = null;
+    }
+  });
+  browser = launched;
+
+  const browserMajorVersion = (launched.version().match(/^(\d+)/) || [])[1] || '151';
   chromeMajorVersion = browserMajorVersion;
   defaultUserAgent = UA_TEMPLATE
     .replace('%PLATFORM%', resolveProfile(STEALTH_PLATFORM).uaPlatform)
     .replace('%VERSION%', `${browserMajorVersion}.0.0.0`);
   console.log(`Presenting as (STEALTH_PLATFORM=${STEALTH_PLATFORM}): ${defaultUserAgent}`);
+  return launched;
+};
+
+const ensureBrowser = async (): Promise<Browser> => {
+  if (browser && browser.isConnected()) {
+    return browser;
+  }
+  if (!browserLaunch) {
+    browserLaunch = initializeBrowser().finally(() => {
+      browserLaunch = null;
+    });
+  }
+  return browserLaunch;
 };
 
 // Which desktop platform to present as. Measured against live bot management
@@ -383,7 +412,7 @@ const createContext = async (skipTlsVerification: boolean = false, userAgentOver
     };
   }
 
-  const newContext = await browser.newContext(contextOptions);
+  const newContext = await (await ensureBrowser()).newContext(contextOptions);
 
   // Only patch what real Chrome actually gets wrong here. Running the real
   // Chrome binary (see initializeBrowser) already provides natively, and
@@ -556,9 +585,7 @@ const scrapePage = async (
 
 app.get('/health', async (req: Request, res: Response) => {
   try {
-    if (!browser) {
-      await initializeBrowser();
-    }
+    await ensureBrowser();
     
     const { context: testContext } = await createContext();
     const testPage = await testContext.newPage();
@@ -616,9 +643,7 @@ app.post('/scrape', async (req: Request, res: Response) => {
     console.warn('⚠️ WARNING: No proxy server provided. Your IP address may be blocked.');
   }
 
-  if (!browser) {
-    await initializeBrowser();
-  }
+  await ensureBrowser();
 
   await pageSemaphore.acquire();
   
@@ -700,7 +725,7 @@ app.post('/scrape', async (req: Request, res: Response) => {
 });
 
 app.listen(port, () => {
-  initializeBrowser().then(() => {
+  ensureBrowser().then(() => {
     console.log(`Server is running on port ${port}`);
   });
 });
