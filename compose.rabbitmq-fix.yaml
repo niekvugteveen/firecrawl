@@ -83,6 +83,15 @@ services:
       - local-tools
 
   rabbitmq:
+    # 3.13 kreeg geen builds meer en heeft geen community-support; upstream firecrawl
+    # zit zelf nog op rabbitmq:3-management (homelab#21, 2026-10-14). 4.x start op de
+    # 3.13-datamap (anoniem volume /var/lib/rabbitmq) alleen als vóór de wissel ALLE
+    # stabiele feature flags aan staan: `rabbitmqctl enable_feature_flag all` op de 3.13-node.
+    # De ERL_ARGS hieronder zijn op 4.3.6 geverifieerd (watermark absoluut 1.0737 gb,
+    # ra wal_max_size_bytes 67108864). Valkuil bij zo'n test: een `docker exec
+    # rabbitmq-diagnostics` als root vlak na de start maakt .erlang.cookie als root aan, en
+    # dan crasht de server op `eacces`. Test met `docker exec -u rabbitmq`, of wacht tot hij draait.
+    image: rabbitmq:4-management
     restart: unless-stopped
     # 722 MiB resident while every queue held *zero* messages (measured
     # 2026-08-19). `rabbitmqctl status` attributed 61% of that to quorum_ets,
